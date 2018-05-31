@@ -114,7 +114,7 @@ get_deps() {
         libsystemd-dev
         libnl-3-dev
         python3-setuptools
-        python-distutils-extra
+        python3-distutils-extra
     "
     local unittest_deps="
         python3-nose
@@ -224,6 +224,7 @@ install_deps() {
     fi
     eval may_run_inside install-deps "${getopt_out}" || return $_RET
 
+    debug 1 "install_deps for $build $unittest $run"
     local deps=""
     deps=$(get_deps "$build" "$unittest" "$run")
     apt_install $deps
@@ -322,14 +323,17 @@ run_container() {
         return
     }
 
-    install_deps "$cflag" ${build} ${unittest} || return
+    install_deps "$cflag" --run ${build} ${unittest} || return
 
     local user="ci-user" dirty="" dir="subiquity"
     add_user "$cflag" "$user" || return
     git_push_clone  "$cflag" "--user=$user" "--dir=$dir" ${dirty:+--dirty} ||
         return
 
-    as_user "$cflag" "--dir=$dir" "$user" -- python3 -m nose tests
+    as_user "$cflag" "--dir=$dir" "$user" -- env FAKE_TRANSLATE=always \
+        python3 setup.py build
+    as_user "$cflag" "--dir=$dir" "$user" -- env FAKE_TRANSLATE=always \
+        python3 -m nose subiquity
 }
 
 Usage_git_push_clone() {
