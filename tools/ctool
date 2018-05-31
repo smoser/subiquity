@@ -23,22 +23,20 @@ Usage: ${0##*/} mode [options]
 
    install-deps  [--container=] [--unittest] [--build] [--run]
 
-   run-container                [--unittest] [--build] [--run] [--artifacts] 
+   run-container                [--unittest] [--build] [--run] [--artifacts]
                                 [--destroy] source [name]
    wait-for-boot [--container=]
    as-user       [--container=] [--dir=] user cmd
    as-root       [--container=] [--dir=]           cmd
-   
+
    add-user      [--container=] user
 
    git-export    [--dirty]
-   git-import    [--container=] [--dir=] [--user=] 
+   git-import    [--container=] [--dir=] [--user=]
 
    global options:
       -v | --verbose: increase verbosity
 
-    Example:
-      * ${0##*/} --package --source-package --unittest centos/6
 EOF
 }
 
@@ -241,6 +239,8 @@ may_run_inside() {
         self_inside="self_inside_with_stdin"
         shift
     fi
+    local first="$1"
+    shift
     while [ $# -gt 0 ]; do
         cur="$1"; next="${2:-}"
         case "$cur" in
@@ -251,8 +251,8 @@ may_run_inside() {
         shift
     done
     [ -z "$container" ] && return 0
-    debug 1 "$self_inside $container ${args[*]}"
-    "$self_inside" $(vflags) "$container" "${args[@]}"
+    debug 1 "$self_inside $container $first ${args[*]}"
+    "$self_inside" "$container" ${first} "${args[@]}"
     _RET=$?
     return 1
 }
@@ -262,7 +262,7 @@ Usage_run_container() {
 run-container [options] source [name]
 
     run a container from 'source'.
-    if name is provided, the name will be used. Otherwise a 
+    if name is provided, the name will be used. Otherwise a
     random name will be selected.
 
     options:
@@ -305,7 +305,7 @@ run_container() {
             error "no 'petname' command available. must provide name."
             return
         }
-        name=$(petname) || { error "petname failed"; return 1; }
+        container=$(petname) || { error "petname failed"; return 1; }
     fi
 
     if [ "${source#*:}" = "${source}" ]; then
@@ -316,18 +316,32 @@ run_container() {
         return
     }
 
-    wait_for_boot "--container=$container" || {
+    local cflag="--container=$container"
+    wait_for_boot "$cflag" || {
         errorrc "$container did not finish booting."
         return
     }
 
-    install_deps "--container=$container" \
-        ${build} ${unittest}
-    local user="ci-user" dirty=""
-    add_user "--container=$container" "$user" || return
-    git_push_clone  "--container=$container" "--user=$user" \
-        --dir="subiquity" ${dirty:+--dirty}
-    
+    install_deps "$cflag" ${build} ${unittest} || return
+
+    local user="ci-user" dirty="" dir="subiquity"
+    add_user "$cflag" "$user" || return
+    git_push_clone  "$cflag" "--user=$user" "--dir=$dir" ${dirty:+--dirty} ||
+        return
+
+    as_user "$cflag" "--dir=$dir" "$user" -- python3 -m nose tests
+}
+
+Usage_git_push_clone() {
+    cat <<EOF
+git-push-clone [options] user cmd
+  export the current repo and import it as USER in DIR.
+
+  -c | --container CONTAINER    import into CONTAINER
+  -u | --user      USER         import as USER
+  -d | --dir       dir          import into DIR
+  -D | --dirty                  apply changes in current repo to pushed repo.
+EOF
 }
 
 git_push_clone() {
@@ -368,8 +382,6 @@ wait_for_boot() {
         eval set -- "${getopt_out}" ||
         { bad_Usage wait_for_boot; return; }
 
-    eval may_run_inside wait-for-boot "${getopt_out}" || return $_RET
-
     local wtime=$DEFAULT_WAIT_MAX container="${_container:-}"
     while [ $# -ne 0 ]; do
         cur="${1:-}"; next="${2:-}";
@@ -381,15 +393,19 @@ wait_for_boot() {
         esac
         shift;
     done
+    eval may_run_inside wait-for-boot "${getopt_out}" || return $_RET
+
     local i=0 check="is_done_other" up=""
     if [ -x /usr/bin/cloud-init ]; then
         check=is_done_cloudinit
     elif [ -e /run/systemd ]; then
         check=is_done_systemd
     fi
-    while ! $check $i && i=$((i+1)); do
+    debug 1 "check is $check"
+    while ! $check $i; do
+        i=$((i+1));
         [ "$i" -ge "$wtime" ] && exit 1
-        [ "$debug" = "0" ] || echo -n .
+        [ "${VERBOSITY}" = "0" ] || echo -n .
         sleep 1
     done
     if [ "$VERBOSITY" != "0" ]; then
@@ -401,8 +417,8 @@ wait_for_boot() {
 }
 
 is_done_cloudinit() {
-    [ -e "/run/cloud-init/result.json" ]
     _RET=""
+    [ -e "/run/cloud-init/result.json" ]
 }
 
 is_done_systemd() {
@@ -471,7 +487,7 @@ as_user() {
         cd "$sdir"
         return
     fi
-    set -- sh -ec 'd="$1"; shift; cd ${d:+"$d"}; exec "$@"' \
+    set -- sh -ec 'd="$1"; shift; cd ~ ; cd ${d:+"$d"}; exec "$@"' \
         changedir "$dir" "$@"
     if [ "$user" != "root" ]; then
         set -- sudo "--user=$user" --set-home -- "$@"
@@ -585,7 +601,7 @@ git_export() {
     }
     local t=${gitdir%/*}
     case "$t" in
-        */worktrees) 
+        */worktrees)
             [ -f "${t%worktrees}/config" ] && gitdir="${t%worktrees}";;
     esac
 
@@ -634,7 +650,7 @@ git_export() {
 
 Usage_git_import() {
     cat <<EOF
-git-import  [--container=] [--dir=] [--user=] 
+git-import  [--container=] [--dir=] [--user=]
 
 import/extract output of git-export.
 EOF
@@ -684,14 +700,14 @@ git_import() {
     local commitish=""
     read commitish < ge-commitish
     rm ge-commitish
-    
+
     cd ..
     git config core.bare false
     out=$(git checkout "$commitish" 2>&1) ||
         { error "failed git checkout $commitish: $out" 1>&2; return 1; }
     out=$(git checkout . 2>&1) ||
         { error "failed git checkout .: $out" 1>&2; return 1; }
-    
+
     if [ -f ".git/ge-apply-changes.diff" ]; then
         debug 2 "applying from .git/ge-apply-changes.diff"
         git apply < .git/ge-apply-changes.diff ||
@@ -702,7 +718,7 @@ git_import() {
         mv ".git/ge-local-changes.diff" "./ge-local-changes.diff" ||
             { error "failed moving local changes to ."; return 1; }
     fi
-    
+
     cd "$dir" || { error "failed cd $dir"; return 1; }
     debug 1 "${container:+[${container}] }wrote to $dir as $user"
 }
@@ -718,7 +734,7 @@ inject_cloud_init(){
     }
     local t=${gitdir%/*}
     case "$t" in
-        */worktrees) 
+        */worktrees)
             if [ -f "${t%worktrees}/config" ]; then
                 gitdir="${t%worktrees}"
             fi
@@ -851,7 +867,7 @@ delete_container() {
 
 case "${1:-}" in
     install-deps|run-container|wait-for-boot|as-user|as-root|add-user|\
-    git-export|git-import)
+    git-export|git-import|git-push-clone)
         _n="${1//-/_}"; shift; "$_n" "$@";;
     *) bad_Usage main; exit;;
 esac
