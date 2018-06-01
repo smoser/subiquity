@@ -253,7 +253,7 @@ may_run_inside() {
     done
     [ -z "$container" ] && return 0
     debug 1 "$self_inside $container $first ${args[*]}"
-    "$self_inside" "$container" ${first} "${args[@]}"
+    "$self_inside" "$container" ${first} $(vflag) "${args[@]}"
     _RET=$?
     return 1
 }
@@ -557,6 +557,9 @@ add_user() {
             "in '$name'";
         return
     }
+    local sline="$user ALL=(ALL) NOPASSWD:ALL"
+    ( umask 226 && echo "$sline" > "/etc/sudoers.d/$user-user" ) ||
+        { errorrc "Failed to add user to sudoers.d"; return; }
 }
 
 Usage_git_export() {
